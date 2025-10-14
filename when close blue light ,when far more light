@@ -1,0 +1,69 @@
+#include <NimBLEDevice.h>
+
+const int PIN = 2;           // 蓝灯引脚
+const int CUTOFF = -60;      // 信号强度阈值(dBm)
+int currentRSSI = -999;      // 当前 RSSI
+
+// ----------------- BLE 服务器回调 -----------------
+class MyServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer* pServer) {
+    Serial.println("✅ 手机已连接！");
+  }
+  void onDisconnect(NimBLEServer* pServer) {
+    Serial.println("❌ 手机断开，重新广播...");
+    NimBLEDevice::startAdvertising();
+  }
+};
+
+// ----------------- 初始化 -----------------
+void setup() {
+  Serial.begin(115200);
+  pinMode(PIN, OUTPUT);
+
+  // 初始化 BLE
+  NimBLEDevice::init("VictorESP32");
+  NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+
+  // 创建 BLE 服务器
+  NimBLEServer* pServer = NimBLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  // 建立一个虚拟服务，使设备可被连接
+  NimBLEService* service = pServer->createService("1234");
+  service->start();
+
+  // 设置广播
+  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+  adv->addServiceUUID(service->getUUID());
+  // ⚠️ NimBLE 2.3.6 无 setScanResponse()，直接删掉即可
+  NimBLEDevice::startAdvertising();
+
+  Serial.println("📡 VictorESP32 正在广播，可用手机连接...");
+}
+
+// ----------------- 主循环 -----------------
+void loop() {
+  NimBLEServer* srv = NimBLEDevice::getServer();
+  int best = -999;
+
+  if (srv && srv->getConnectedCount() > 0) {
+    // 获取当前连接的句柄
+    std::vector<uint16_t> peers = srv->getPeerDevices();
+    if (!peers.empty()) {
+      uint16_t handle = peers[0];
+
+      // 创建 client “视图”来获取链路 RSSI
+      NimBLEClient* cli = srv->getClient(handle);
+      if (cli) {
+        best = cli->getRssi();
+        Serial.print("📶 当前 RSSI = ");
+        Serial.println(best);
+        srv->deleteClient();     // 可选：释放临时 client
+      }
+    }
+  }
+
+  // 根据信号强弱控制蓝灯
+  digitalWrite(PIN, best > CUTOFF ? HIGH : LOW);
+  delay(500);
+}
