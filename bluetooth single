@@ -1,0 +1,91 @@
+#include <Arduino.h>
+#include <NimBLEDevice.h>
+
+// ====== 可调参数 ======
+const int LED_PIN   = 2;     // LED 引脚
+const int RSSI_MIN  = -75;   // 你场景下“较远”的 RSSI（调小=更远才有亮度）
+const int RSSI_MAX  = -50;   // 你场景下“较近”的 RSSI（调大=更近才最亮）
+const float GAMMA   = 2.2f;  // 人眼亮度增强（2.0~2.4 常用）
+// =====================
+
+class MyServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer* pServer) {
+    Serial.println("✅ 手机已连接");
+  }
+  void onDisconnect(NimBLEServer* pServer) {
+    Serial.println("❌ 手机断开，重新广播...");
+    NimBLEDevice::startAdvertising();
+  }
+};
+
+void setup() {
+  Serial.begin(115200);
+
+  // ESP32 Core 3.x: 直接按“引脚”附着 PWM，5kHz，8位(0~255)
+  ledcAttach(LED_PIN, 5000, 8);
+
+  // 初始化 BLE
+  NimBLEDevice::init("VictorESP32");
+  NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+
+  NimBLEServer* pServer = NimBLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  NimBLEService* service = pServer->createService("1234");
+  service->start();
+
+  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+  adv->addServiceUUID(service->getUUID());
+  NimBLEDevice::startAdvertising();
+
+  Serial.println("📡 VictorESP32 正在广播，可用手机连接...");
+}
+
+void loop() {
+  NimBLEServer* srv = NimBLEDevice::getServer();
+  int bestRSSI = -1000;
+
+  if (srv && srv->getConnectedCount() > 0) {
+    std::vector<uint16_t> peers = srv->getPeerDevices();
+    for (uint16_t handle : peers) {
+      NimBLEClient* cli = srv->getClient(handle);
+      if (cli) {
+        int rssi = cli->getRssi();         // dBm：-45 > -70 表示更强
+        if (rssi > bestRSSI) bestRSSI = rssi;
+      }
+    }
+    if (bestRSSI > -1000) {
+      Serial.print("📶 RSSI = ");
+      Serial.println(bestRSSI);
+    }
+  }
+
+  // 未连接或无RSSI → 熄灭
+  if (bestRSSI == -1000) {
+    ledcWrite(LED_PIN, 0);
+    delay(300);
+    return;
+  }
+
+  // 1) 限幅：仅在有效区间内映射
+  int rssiClamped = constrain(bestRSSI, RSSI_MIN, RSSI_MAX);
+
+  // 2) 线性映射到 0~255
+  int lin = map(rssiClamped, RSSI_MIN, RSSI_MAX, 0, 255);
+  lin = constrain(lin, 0, 255);
+
+  // 3) 人眼亮度增强（伽玛校正）
+  //    先归一化到0~1，做 pow，再放大回0~255
+  float norm = lin / 255.0f;
+  int brightness = (int)(powf(norm, GAMMA) * 255.0f + 0.5f);
+
+  // 如果你的LED是“低电平点亮”，反向输出：
+  // brightness = 255 - brightness;
+
+  ledcWrite(LED_PIN, brightness);
+
+  Serial.print("💡 亮度 = ");
+  Serial.println(brightness);
+
+  delay(300);
+}
